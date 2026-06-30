@@ -162,7 +162,6 @@ async def show_categories_list(message: Message, state: FSMContext, is_back: boo
         text = "🗂 У вас нет категорий расходов.\n\nХотите добавить категорию?"
         buttons = [
             [InlineKeyboardButton(text="➕ Добавить категорию", callback_data="cat_add_from_empty")],
-            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_categories")],
             [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
         ]
     else:
@@ -171,17 +170,14 @@ async def show_categories_list(message: Message, state: FSMContext, is_back: boo
         buttons = [[InlineKeyboardButton(text=f"❌ {cat[1]}", callback_data=f"cat_del_id_{cat[0]}")] for cat in categories]
         buttons.append([
             InlineKeyboardButton(text="➕ Добавить категорию", callback_data="cat_add"),
-            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_categories"),
             InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
         ])
     
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     
     if is_back:
-        # Если это возврат - просто обновляем сообщение
         await message.edit_text(text, reply_markup=kb)
     else:
-        # Если новый вызов - удаляем старое и создаем новое
         msg = await message.answer(text, reply_markup=kb)
         await add_message_to_cleanup(msg, state)
 
@@ -245,6 +241,91 @@ async def get_main_menu_with_stats(user_id: int):
     
     return text
 
+async def get_detailed_stats(user_id: int):
+    """Детальная статистика по дням"""
+    current_time = await get_current_datetime(user_id)
+    current_month = current_time.strftime("%Y-%m")
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Получаем все расходы за месяц сгруппированные по дням и категориям
+        async with db.execute("""
+            SELECT 
+                date,
+                c.name as category_name,
+                SUM(e.amount) as total
+            FROM expenses e
+            JOIN categories c ON e.category_id = c.id
+            WHERE e.user_id = ? AND strftime('%Y-%m', e.date) = ?
+            GROUP BY date, e.category_id
+            ORDER BY date DESC, total DESC
+        """, (user_id, current_month)) as cursor:
+            expenses_by_day = await cursor.fetchall()
+        
+        # Получаем доходы за месяц
+        async with db.execute("""
+            SELECT 
+                date,
+                comment,
+                SUM(amount) as total
+            FROM incomes
+            WHERE user_id = ? AND strftime('%Y-%m', date) = ?
+            GROUP BY date, comment
+            ORDER BY date DESC, total DESC
+        """, (user_id, current_month)) as cursor:
+            incomes_by_day = await cursor.fetchall()
+    
+    text = f"📊 {html.bold('Детальная статистика за месяц')} ({current_month}):\n\n"
+    
+    # Группируем расходы по дням
+    days = {}
+    for date, category, amount in expenses_by_day:
+        if date not in days:
+            days[date] = {'expenses': [], 'incomes': []}
+        days[date]['expenses'].append((category, amount))
+    
+    # Группируем доходы по дням
+    for date, comment, amount in incomes_by_day:
+        if date not in days:
+            days[date] = {'expenses': [], 'incomes': []}
+        category_name = comment if comment else "Без категории"
+        days[date]['incomes'].append((category_name, amount))
+    
+    if not days:
+        text += "За этот месяц нет операций."
+        return text
+    
+    # Сортируем дни по убыванию
+    sorted_days = sorted(days.keys(), reverse=True)
+    
+    for day in sorted_days:
+        date_obj = datetime.strptime(day, "%Y-%m-%d")
+        day_display = date_obj.strftime("%d.%m.%Y")
+        
+        day_total_expense = sum(amount for _, amount in days[day]['expenses'])
+        day_total_income = sum(amount for _, amount in days[day]['incomes'])
+        
+        text += f"📅 {html.bold(day_display)}\n"
+        
+        if days[day]['expenses']:
+            text += f"   📉 Расходы: {day_total_expense} руб.\n"
+            # Сортируем категории по сумме от большей к меньшей
+            sorted_expenses = sorted(days[day]['expenses'], key=lambda x: x[1], reverse=True)
+            for category, amount in sorted_expenses:
+                text += f"      • {category}: {amount} руб.\n"
+        
+        if days[day]['incomes']:
+            text += f"   💰 Доходы: {day_total_income} руб.\n"
+            sorted_incomes = sorted(days[day]['incomes'], key=lambda x: x[1], reverse=True)
+            for category, amount in sorted_incomes:
+                text += f"      • {category}: {amount} руб.\n"
+        
+        if not days[day]['expenses'] and not days[day]['incomes']:
+            text += f"   Операций не было\n"
+        
+        text += "\n"
+    
+    return text
+
 # =====================================================================
 # КЛАВИАТУРЫ
 # =====================================================================
@@ -255,24 +336,21 @@ def get_main_menu():
         [InlineKeyboardButton(text="📉 Расходы", callback_data="menu_expense")],
         [InlineKeyboardButton(text="🗂 Категории", callback_data="menu_categories")],
         [InlineKeyboardButton(text="🤝 Долги", callback_data="menu_debts")],
+        [InlineKeyboardButton(text="📊 Детальная статистика", callback_data="menu_detailed_stats")],
         [InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu_settings")]
     ])
 
-def get_back_menu(back_callback: str = "back"):
-    """Кнопки навигации"""
+def get_home_menu():
+    """Кнопка 'В меню'"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🔙 Назад", callback_data=back_callback),
-            InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
-        ]
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
     ])
 
 def get_settings_menu():
     """Меню настроек"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🕐 Изменить часовой пояс", callback_data="change_timezone")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_settings"),
-         InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
     ])
 
 def get_timezone_menu():
@@ -289,8 +367,7 @@ def get_timezone_menu():
         [InlineKeyboardButton(text="🕐 UTC+10 (Владивосток)", callback_data="tz_Asia/Vladivostok")],
         [InlineKeyboardButton(text="🕐 UTC+11 (Магадан)", callback_data="tz_Asia/Magadan")],
         [InlineKeyboardButton(text="🕐 UTC+12 (Камчатка)", callback_data="tz_Asia/Kamchatka")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_timezone"),
-         InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
     ])
 
 def get_income_comment_menu():
@@ -300,10 +377,7 @@ def get_income_comment_menu():
             InlineKeyboardButton(text="✅ Да", callback_data="income_comment_yes"),
             InlineKeyboardButton(text="❌ Нет", callback_data="income_comment_no")
         ],
-        [
-            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_income"),
-            InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
-        ]
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
     ])
 
 def get_continue_or_menu(continue_callback: str = "continue"):
@@ -391,6 +465,24 @@ async def back_to_main_menu(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 # ---------------------------------------------------------------------
+# СЦЕНАРИЙ: ДЕТАЛЬНАЯ СТАТИСТИКА
+# ---------------------------------------------------------------------
+@dp.callback_query(F.data == "menu_detailed_stats")
+async def process_detailed_stats(callback: CallbackQuery, state: FSMContext):
+    """Обработчик детальной статистики"""
+    await state.clear()
+    await callback.message.delete()
+    
+    stats_text = await get_detailed_stats(callback.from_user.id)
+    
+    msg = await callback.message.answer(
+        stats_text,
+        reply_markup=get_home_menu()
+    )
+    await add_message_to_cleanup(msg, state)
+    await callback.answer()
+
+# ---------------------------------------------------------------------
 # СЦЕНАРИЙ: НАСТРОЙКИ
 # ---------------------------------------------------------------------
 @dp.callback_query(F.data == "menu_settings")
@@ -435,47 +527,6 @@ async def process_change_timezone(callback: CallbackQuery, state: FSMContext):
     await add_message_to_cleanup(msg, state)
     await callback.answer()
 
-@dp.callback_query(F.data == "back_to_settings")
-async def back_to_settings(callback: CallbackQuery, state: FSMContext):
-    """Возврат в меню настроек"""
-    await callback.message.delete()
-    
-    current_tz = await get_user_timezone(callback.from_user.id)
-    tz_display = {
-        'Europe/Kaliningrad': 'UTC+2 (Калининград)',
-        'Europe/Moscow': 'UTC+3 (Москва)',
-        'Europe/Samara': 'UTC+4 (Самара)',
-        'Asia/Yekaterinburg': 'UTC+5 (Екатеринбург)',
-        'Asia/Omsk': 'UTC+6 (Омск)',
-        'Asia/Krasnoyarsk': 'UTC+7 (Красноярск)',
-        'Asia/Irkutsk': 'UTC+8 (Иркутск)',
-        'Asia/Yakutsk': 'UTC+9 (Якутск)',
-        'Asia/Vladivostok': 'UTC+10 (Владивосток)',
-        'Asia/Magadan': 'UTC+11 (Магадан)',
-        'Asia/Kamchatka': 'UTC+12 (Камчатка)'
-    }
-    
-    text = f"⚙️ Настройки\n\nТекущий часовой пояс: {tz_display.get(current_tz, current_tz)}\n\nВыберите действие:"
-    
-    msg = await callback.message.answer(
-        text,
-        reply_markup=get_settings_menu()
-    )
-    await add_message_to_cleanup(msg, state)
-    await callback.answer()
-
-@dp.callback_query(F.data == "back_to_timezone")
-async def back_to_timezone(callback: CallbackQuery, state: FSMContext):
-    """Возврат к выбору часового пояса"""
-    await callback.message.delete()
-    
-    msg = await callback.message.answer(
-        "🕐 Выберите часовой пояс России:",
-        reply_markup=get_timezone_menu()
-    )
-    await add_message_to_cleanup(msg, state)
-    await callback.answer()
-
 @dp.callback_query(F.data.startswith("tz_"))
 async def process_timezone_selected(callback: CallbackQuery, state: FSMContext):
     """Обработчик выбора часового пояса"""
@@ -505,20 +556,8 @@ async def process_timezone_selected(callback: CallbackQuery, state: FSMContext):
     }
     
     msg = await callback.message.answer(
-        f"✅ Часовой пояс изменен на {tz_display.get(tz, tz)}\n\nВозвращаемся в настройки...",
-        reply_markup=get_back_menu("back_to_settings")
-    )
-    await add_message_to_cleanup(msg, state)
-    await asyncio.sleep(1.5)
-    
-    await callback.message.delete()
-    current_tz = await get_user_timezone(callback.from_user.id)
-    
-    text = f"⚙️ Настройки\n\nТекущий часовой пояс: {tz_display.get(current_tz, current_tz)}\n\nВыберите действие:"
-    
-    msg = await callback.message.answer(
-        text,
-        reply_markup=get_settings_menu()
+        f"✅ Часовой пояс изменен на {tz_display.get(tz, tz)}",
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
@@ -532,7 +571,7 @@ async def process_income_start(callback: CallbackQuery, state: FSMContext):
     await state.set_state(FinanceStates.income_amount)
     msg = await callback.message.answer(
         "💰 Введите сумму дохода:",
-        reply_markup=get_back_menu("back_to_main")
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
@@ -554,21 +593,9 @@ async def process_income_amount(message: Message, state: FSMContext):
     except ValueError:
         msg = await message.answer(
             "❌ Пожалуйста, введите корректное положительное число.",
-            reply_markup=get_back_menu("back_to_main")
+            reply_markup=get_home_menu()
         )
         await add_message_to_cleanup(msg, state)
-
-@dp.callback_query(F.data == "back_to_income")
-async def back_to_income_amount(callback: CallbackQuery, state: FSMContext):
-    """Возврат к вводу суммы дохода"""
-    await callback.message.delete()
-    await state.set_state(FinanceStates.income_amount)
-    msg = await callback.message.answer(
-        "💰 Введите сумму дохода:",
-        reply_markup=get_back_menu("back_to_main")
-    )
-    await add_message_to_cleanup(msg, state)
-    await callback.answer()
 
 @dp.callback_query(F.data == "income_comment_yes")
 async def process_income_comment_yes(callback: CallbackQuery, state: FSMContext):
@@ -576,7 +603,7 @@ async def process_income_comment_yes(callback: CallbackQuery, state: FSMContext)
     await state.set_state(FinanceStates.income_comment)
     msg = await callback.message.answer(
         "💬 Введите комментарий к доходу:",
-        reply_markup=get_back_menu("back_to_income")
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
@@ -646,7 +673,6 @@ async def process_expense_start(callback: CallbackQuery, state: FSMContext):
             "❌ У вас нет категорий расходов.\n\nХотите создать категорию?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="➕ Создать категорию", callback_data="cat_add_from_expense")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")],
                 [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
             ])
         )
@@ -656,7 +682,6 @@ async def process_expense_start(callback: CallbackQuery, state: FSMContext):
 
     buttons = [[InlineKeyboardButton(text=cat[1], callback_data=f"exp_cat_{cat[0]}")] for cat in categories]
     buttons.append([
-        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main"),
         InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
     ])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -675,16 +700,10 @@ async def cb_add_category_from_expense(callback: CallbackQuery, state: FSMContex
     await state.set_state(FinanceStates.add_category_from_expense)
     msg = await callback.message.answer(
         "➕ Введите название новой категории:",
-        reply_markup=get_back_menu("back_to_expense")
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
-
-@dp.callback_query(F.data == "back_to_expense")
-async def back_to_expense(callback: CallbackQuery, state: FSMContext):
-    """Возврат к выбору категории расхода"""
-    await callback.message.delete()
-    await process_expense_start(callback, state)
 
 @dp.message(FinanceStates.add_category_from_expense)
 async def process_add_category_from_expense(message: Message, state: FSMContext):
@@ -692,7 +711,7 @@ async def process_add_category_from_expense(message: Message, state: FSMContext)
     if not title:
         msg = await message.answer(
             "❌ Название не может быть пустым.",
-            reply_markup=get_back_menu("back_to_expense")
+            reply_markup=get_home_menu()
         )
         await add_message_to_cleanup(msg, state)
         return
@@ -715,7 +734,7 @@ async def process_add_category_from_expense(message: Message, state: FSMContext)
         await state.set_state(FinanceStates.expense_amount)
         msg = await message.answer(
             f"✅ Категория '{title}' создана!\n\nВведите сумму расхода:",
-            reply_markup=get_back_menu("back_to_expense")
+            reply_markup=get_home_menu()
         )
         await add_message_to_cleanup(msg, state)
     else:
@@ -736,16 +755,10 @@ async def process_expense_cat_chosen(callback: CallbackQuery, state: FSMContext)
     await callback.message.delete()
     msg = await callback.message.answer(
         "Введите сумму расхода:",
-        reply_markup=get_back_menu("back_to_expense_cat")
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
-
-@dp.callback_query(F.data == "back_to_expense_cat")
-async def back_to_expense_cat(callback: CallbackQuery, state: FSMContext):
-    """Возврат к выбору категории"""
-    await callback.message.delete()
-    await process_expense_start(callback, state)
 
 @dp.message(FinanceStates.expense_amount)
 async def process_expense_amount(message: Message, state: FSMContext):
@@ -777,7 +790,7 @@ async def process_expense_amount(message: Message, state: FSMContext):
     except ValueError:
         msg = await message.answer(
             "❌ Пожалуйста, введите корректное положительное число.",
-            reply_markup=get_back_menu("back_to_expense_cat")
+            reply_markup=get_home_menu()
         )
         await add_message_to_cleanup(msg, state)
 
@@ -795,7 +808,6 @@ async def continue_adding_expense(callback: CallbackQuery, state: FSMContext):
             "❌ У вас нет категорий расходов.\n\nХотите создать категорию?",
             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="➕ Создать категорию", callback_data="cat_add_from_expense")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main")],
                 [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
             ])
         )
@@ -805,7 +817,6 @@ async def continue_adding_expense(callback: CallbackQuery, state: FSMContext):
 
     buttons = [[InlineKeyboardButton(text=cat[1], callback_data=f"exp_cat_{cat[0]}")] for cat in categories]
     buttons.append([
-        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main"),
         InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
     ])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -827,20 +838,13 @@ async def process_categories_main(callback: CallbackQuery, state: FSMContext):
     await show_categories_list(callback.message, state, False)
     await callback.answer()
 
-@dp.callback_query(F.data == "back_to_categories")
-async def back_to_categories(callback: CallbackQuery, state: FSMContext):
-    """Возврат к списку категорий"""
-    await callback.message.delete()
-    await show_categories_list(callback.message, state, False)
-    await callback.answer()
-
 @dp.callback_query(F.data == "cat_add")
 async def cb_add_category(callback: CallbackQuery, state: FSMContext):
     await callback.message.delete()
     await state.set_state(FinanceStates.add_category)
     msg = await callback.message.answer(
         "➕ Введите название новой категории:",
-        reply_markup=get_back_menu("back_to_categories")
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
@@ -851,7 +855,7 @@ async def process_add_category_title(message: Message, state: FSMContext):
     if not title:
         msg = await message.answer(
             "❌ Название не может быть пустым.",
-            reply_markup=get_back_menu("back_to_categories")
+            reply_markup=get_home_menu()
         )
         await add_message_to_cleanup(msg, state)
         return
@@ -876,7 +880,7 @@ async def continue_adding_category(callback: CallbackQuery, state: FSMContext):
     await state.set_state(FinanceStates.add_category)
     msg = await callback.message.answer(
         "➕ Введите название новой категории:",
-        reply_markup=get_back_menu("back_to_categories")
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
@@ -953,8 +957,7 @@ def get_debts_menu():
          InlineKeyboardButton(text="💰 Мне вернули", callback_data="return_owed_to_me")],
         [InlineKeyboardButton(text="🙇‍♂️ Я должен (Новый)", callback_data="debt_i_owe"),
          InlineKeyboardButton(text="💸 Я вернул", callback_data="return_i_owe")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_main"),
-         InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
+        [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
     ])
 
 @dp.callback_query(F.data.startswith("debt_"))
@@ -966,16 +969,10 @@ async def cb_new_debt(callback: CallbackQuery, state: FSMContext):
     await callback.message.delete()
     msg = await callback.message.answer(
         "👤 Введите имя человека:",
-        reply_markup=get_back_menu("back_to_debts")
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
-
-@dp.callback_query(F.data == "back_to_debts")
-async def back_to_debts(callback: CallbackQuery, state: FSMContext):
-    """Возврат к списку долгов"""
-    await callback.message.delete()
-    await process_debts_main(callback, state)
 
 @dp.message(FinanceStates.debt_name)
 async def process_debt_name(message: Message, state: FSMContext):
@@ -987,21 +984,9 @@ async def process_debt_name(message: Message, state: FSMContext):
     
     msg = await message.answer(
         "💰 Введите сумму:",
-        reply_markup=get_back_menu("back_to_debt_name")
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
-
-@dp.callback_query(F.data == "back_to_debt_name")
-async def back_to_debt_name(callback: CallbackQuery, state: FSMContext):
-    """Возврат к вводу имени"""
-    await callback.message.delete()
-    await state.set_state(FinanceStates.debt_name)
-    msg = await callback.message.answer(
-        "👤 Введите имя человека:",
-        reply_markup=get_back_menu("back_to_debts")
-    )
-    await add_message_to_cleanup(msg, state)
-    await callback.answer()
 
 @dp.message(FinanceStates.debt_amount)
 async def process_debt_amount(message: Message, state: FSMContext):
@@ -1029,7 +1014,7 @@ async def process_debt_amount(message: Message, state: FSMContext):
     except ValueError:
         msg = await message.answer(
             "❌ Пожалуйста, введите корректное число.",
-            reply_markup=get_back_menu("back_to_debt_name")
+            reply_markup=get_home_menu()
         )
         await add_message_to_cleanup(msg, state)
 
@@ -1040,7 +1025,7 @@ async def continue_adding_debt(callback: CallbackQuery, state: FSMContext):
     await state.set_state(FinanceStates.debt_name)
     msg = await callback.message.answer(
         "👤 Введите имя человека:",
-        reply_markup=get_back_menu("back_to_debts")
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
@@ -1061,7 +1046,7 @@ async def cb_return_debt_list(callback: CallbackQuery, state: FSMContext):
     if not rows:
         msg = await callback.message.answer(
             "❌ Нет подходящих активных долгов.",
-            reply_markup=get_back_menu("back_to_debts")
+            reply_markup=get_home_menu()
         )
         await add_message_to_cleanup(msg, state)
         await callback.answer()
@@ -1069,7 +1054,6 @@ async def cb_return_debt_list(callback: CallbackQuery, state: FSMContext):
         
     buttons = [[InlineKeyboardButton(text=f"{r[1]} ({r[2]}р)", callback_data=f"ret_sel_{r[0]}")] for r in rows]
     buttons.append([
-        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_debts"),
         InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
     ])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -1091,19 +1075,10 @@ async def cb_return_debt_amount_request(callback: CallbackQuery, state: FSMConte
     await callback.message.delete()
     msg = await callback.message.answer(
         "💰 Какую сумму внести (вернуть)?",
-        reply_markup=get_back_menu("back_to_debt_return")
+        reply_markup=get_home_menu()
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
-
-@dp.callback_query(F.data == "back_to_debt_return")
-async def back_to_debt_return(callback: CallbackQuery, state: FSMContext):
-    """Возврат к выбору долга для погашения"""
-    await callback.message.delete()
-    debt_type = await state.get_data()
-    debt_type = debt_type.get('return_debt_type', 'owed_to_me')
-    await state.set_state(FinanceStates.debt_return_select)
-    await cb_return_debt_list(callback, state)
 
 @dp.message(FinanceStates.debt_return_amount)
 async def process_debt_return_final(message: Message, state: FSMContext):
@@ -1122,7 +1097,7 @@ async def process_debt_return_final(message: Message, state: FSMContext):
             if not row:
                 msg = await message.answer(
                     "❌ Ошибка: Долг не найден.",
-                    reply_markup=get_back_menu("back_to_debts")
+                    reply_markup=get_home_menu()
                 )
                 await add_message_to_cleanup(msg, state)
                 await state.clear()
@@ -1168,7 +1143,7 @@ async def process_debt_return_final(message: Message, state: FSMContext):
     except ValueError:
         msg = await message.answer(
             "❌ Пожалуйста, введите корректное положительное число.",
-            reply_markup=get_back_menu("back_to_debt_return")
+            reply_markup=get_home_menu()
         )
         await add_message_to_cleanup(msg, state)
 
