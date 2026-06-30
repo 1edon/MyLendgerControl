@@ -865,4 +865,74 @@ async def process_statistics(callback: CallbackQuery, state: FSMContext):
     text += f"💰 {html.bold('Доходы:')} {total_income} руб.\n"
     text += f"📉 {html.bold('Расходы:')} {total_expense} руб.\n"
     
-    if total_return
+    if total_returned > 0:
+        text += f"💳 {html.bold('Возвращено долгов:')} {total_returned} руб.\n"
+    
+    text += f"⚖️ {html.bold('Баланс:')} {balance} руб."
+    
+    if total_returned > 0:
+        text += f" (Из них {total_returned} руб. - возвращенные долги)\n\n"
+    else:
+        text += "\n\n"
+    
+    # Процентное соотношение расходов
+    if total_expense > 0:
+        text += html.bold("📊 Распределение расходов:\n")
+        for cat_name, sum_val in top_categories:
+            percentage = (sum_val / total_expense) * 100
+            text += f"• {cat_name}: {percentage:.1f}% ({sum_val} руб.)\n"
+        
+        # Остальные расходы
+        async with aiosqlite.connect(DB_NAME) as db:
+            async with db.execute("""
+                SELECT SUM(e.amount) as total 
+                FROM expenses e
+                WHERE e.user_id = ? 
+                AND strftime('%Y-%m', e.date) = ?
+                AND e.category_id NOT IN (
+                    SELECT category_id FROM expenses 
+                    WHERE user_id = ? 
+                    AND strftime('%Y-%m', date) = ?
+                    GROUP BY category_id
+                    ORDER BY SUM(amount) DESC
+                    LIMIT 3
+                )
+            """, (callback.from_user.id, current_month, callback.from_user.id, current_month)) as cursor:
+                other_total = (await cursor.fetchone())[0] or 0.0
+        
+        if other_total > 0:
+            other_percentage = (other_total / total_expense) * 100
+            text += f"• Остальное: {other_percentage:.1f}% ({other_total} руб.)\n"
+    else:
+        text += "📊 За этот месяц расходов еще не было."
+    
+    msg = await callback.message.answer(
+        text,
+        reply_markup=get_back_menu()
+    )
+    await add_message_to_cleanup(msg, state)
+    await callback.answer()
+
+# =====================================================================
+# ЗАПУСК БОТА
+# =====================================================================
+async def main():
+    """Главная функция запуска бота"""
+    if not BOT_TOKEN:
+        logger.error("Токен бота не задан в переменной BOT_TOKEN в файле .env")
+        return
+        
+    await init_db()
+    
+    logger.info("🚀 Бот успешно запущен и готов к работе!")
+    logger.info("📊 Нажмите Ctrl+C для остановки")
+    
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("\n👋 Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
