@@ -32,6 +32,76 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # =====================================================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ ФОРМАТИРОВАНИЯ ВАЛЮТЫ
+# =====================================================================
+def format_currency(amount: float) -> str:
+    """
+    Форматирует число в валютный формат с разделителем тысяч - точка
+    Пример: 5000 -> 5.000 ₽
+    """
+    # Округляем до 2 знаков после запятой
+    amount = round(amount, 2)
+    
+    # Разделяем целую и дробную части
+    if amount == int(amount):
+        # Если число целое, показываем без копеек
+        integer_part = str(int(amount))
+        formatted = f"{integer_part} ₽"
+    else:
+        # Если есть копейки
+        integer_part = str(int(amount))
+        decimal_part = str(int(round((amount - int(amount)) * 100))).zfill(2)
+        formatted = f"{integer_part}.{decimal_part} ₽"
+    
+    # Добавляем разделитель тысяч (точка)
+    parts = formatted.split('.')
+    if len(parts) == 2:
+        # Есть десятичная часть
+        integer_part = parts[0]
+        decimal_part = parts[1]
+        # Форматируем целую часть с разделителями
+        integer_formatted = ''
+        for i, char in enumerate(reversed(integer_part)):
+            if i > 0 and i % 3 == 0:
+                integer_formatted = '.' + integer_formatted
+            integer_formatted = char + integer_formatted
+        return f"{integer_formatted}.{decimal_part} ₽"
+    else:
+        # Нет десятичной части
+        integer_part = parts[0]
+        integer_formatted = ''
+        for i, char in enumerate(reversed(integer_part)):
+            if i > 0 and i % 3 == 0:
+                integer_formatted = '.' + integer_formatted
+            integer_formatted = char + integer_formatted
+        return f"{integer_formatted} ₽"
+
+def format_currency_without_symbol(amount: float) -> str:
+    """
+    Форматирует число с разделителем тысяч - точка, без символа ₽
+    Пример: 5000 -> 5.000
+    """
+    amount = round(amount, 2)
+    
+    if amount == int(amount):
+        integer_part = str(int(amount))
+        integer_formatted = ''
+        for i, char in enumerate(reversed(integer_part)):
+            if i > 0 and i % 3 == 0:
+                integer_formatted = '.' + integer_formatted
+            integer_formatted = char + integer_formatted
+        return integer_formatted
+    else:
+        integer_part = str(int(amount))
+        decimal_part = str(int(round((amount - int(amount)) * 100))).zfill(2)
+        integer_formatted = ''
+        for i, char in enumerate(reversed(integer_part)):
+            if i > 0 and i % 3 == 0:
+                integer_formatted = '.' + integer_formatted
+            integer_formatted = char + integer_formatted
+        return f"{integer_formatted}.{decimal_part}"
+
+# =====================================================================
 # ИНИЦИАЛИЗАЦИЯ БАЗЫ ДАННЫХ
 # =====================================================================
 async def init_db():
@@ -222,21 +292,21 @@ async def get_main_menu_with_stats(user_id: int):
     
     text = f"🏠 Главное меню\n\n"
     text += f"📊 {html.bold('Статистика за текущий месяц')} ({current_month}):\n"
-    text += f"💰 Доходы: {total_income} руб.\n"
+    text += f"💰 Доходы: {format_currency(total_income)}\n"
     
     # Выводим категории доходов
     if income_categories:
         for comment, amount in income_categories:
             category_name = comment if comment else "Без категории"
-            text += f"   • {category_name}: {amount} руб.\n"
+            text += f"   • {category_name}: {format_currency(amount)}\n"
     
-    text += f"📉 Расходы: {total_expense} руб.\n"
+    text += f"📉 Расходы: {format_currency(total_expense)}\n"
     
     if total_returned > 0:
-        text += f"💳 Возвращено долгов: {total_returned} руб.\n"
-    text += f"⚖️ Баланс: {balance} руб."
+        text += f"💳 Возвращено долгов: {format_currency(total_returned)}\n"
+    text += f"⚖️ Баланс: {format_currency(balance)}"
     if total_returned > 0:
-        text += f" (Из них {total_returned} руб. - возвращенные долги)\n"
+        text += f" (Из них {format_currency(total_returned)} - возвращенные долги)\n"
     text += "\n\nВыберите действие:"
     
     return text
@@ -307,17 +377,17 @@ async def get_detailed_stats(user_id: int):
         text += f"📅 {html.bold(day_display)}\n"
         
         if days[day]['expenses']:
-            text += f"   📉 Расходы: {day_total_expense} руб.\n"
+            text += f"   📉 Расходы: {format_currency(day_total_expense)}\n"
             # Сортируем категории по сумме от большей к меньшей
             sorted_expenses = sorted(days[day]['expenses'], key=lambda x: x[1], reverse=True)
             for category, amount in sorted_expenses:
-                text += f"      • {category}: {amount} руб.\n"
+                text += f"      • {category}: {format_currency(amount)}\n"
         
         if days[day]['incomes']:
-            text += f"   💰 Доходы: {day_total_income} руб.\n"
+            text += f"   💰 Доходы: {format_currency(day_total_income)}\n"
             sorted_incomes = sorted(days[day]['incomes'], key=lambda x: x[1], reverse=True)
             for category, amount in sorted_incomes:
-                text += f"      • {category}: {amount} руб.\n"
+                text += f"      • {category}: {format_currency(amount)}\n"
         
         if not days[day]['expenses'] and not days[day]['incomes']:
             text += f"   Операций не было\n"
@@ -586,7 +656,7 @@ async def process_income_amount(message: Message, state: FSMContext):
         
         await message.delete()
         msg = await message.answer(
-            f"💰 Сумма: {amount} руб.\n\nХотите добавить комментарий?",
+            f"💰 Сумма: {format_currency(amount)}\n\nХотите добавить комментарий?",
             reply_markup=get_income_comment_menu()
         )
         await add_message_to_cleanup(msg, state)
@@ -626,7 +696,7 @@ async def process_income_comment_no(callback: CallbackQuery, state: FSMContext):
     
     main_text = await get_main_menu_with_stats(callback.from_user.id)
     msg = await callback.message.answer(
-        f"✅ Доход сохранен: {amount} руб.\n\n{main_text}",
+        f"✅ Доход сохранен: {format_currency(amount)}\n\n{main_text}",
         reply_markup=get_main_menu()
     )
     await add_message_to_cleanup(msg, state)
@@ -652,7 +722,7 @@ async def process_income_comment(message: Message, state: FSMContext):
     
     main_text = await get_main_menu_with_stats(message.from_user.id)
     msg = await message.answer(
-        f"✅ Доход сохранен: {amount} руб.\n💬 Комментарий: {comment}\n\n{main_text}",
+        f"✅ Доход сохранен: {format_currency(amount)}\n💬 Комментарий: {comment}\n\n{main_text}",
         reply_markup=get_main_menu()
     )
     await add_message_to_cleanup(msg, state)
@@ -783,7 +853,7 @@ async def process_expense_amount(message: Message, state: FSMContext):
         await message.delete()
         
         msg = await message.answer(
-            f"✅ Расход сохранен: {amount} руб.\n\nХотите добавить еще расход?",
+            f"✅ Расход сохранен: {format_currency(amount)}\n\nХотите добавить еще расход?",
             reply_markup=get_continue_or_menu("continue_expense")
         )
         await add_message_to_cleanup(msg, state)
@@ -924,24 +994,24 @@ async def process_debts_main(callback: CallbackQuery, state: FSMContext):
     
     for name, amount, d_type in rows:
         if d_type == 'owed_to_me':
-            owed_to_me.append(f"• {name}: {amount} руб.")
+            owed_to_me.append(f"• {name}: {format_currency(amount)}")
             total_owed_to_me += amount
         else:
-            i_owe.append(f"• {name}: {amount} руб.")
+            i_owe.append(f"• {name}: {format_currency(amount)}")
             total_i_owe += amount
     
     total_debts = total_owed_to_me + total_i_owe
             
     text = f"📋 {html.bold('Текущие долги')}\n\n"
-    text += f"💰 {html.bold('Общая сумма долгов:')} {total_debts} руб.\n\n"
+    text += f"💰 {html.bold('Общая сумма долгов:')} {format_currency(total_debts)}\n\n"
     
     text += html.underline("🙋‍♂️ Мне должны:\n")
     text += ("\n".join(owed_to_me) if owed_to_me else "Нет записей")
-    text += f"\n{html.bold('Итого:')} {total_owed_to_me} руб.\n\n"
+    text += f"\n{html.bold('Итого:')} {format_currency(total_owed_to_me)}\n\n"
     
     text += html.underline("🙇‍♂️ Я должен:\n")
     text += ("\n".join(i_owe) if i_owe else "Нет записей")
-    text += f"\n{html.bold('Итого:')} {total_i_owe} руб."
+    text += f"\n{html.bold('Итого:')} {format_currency(total_i_owe)}"
     
     msg = await callback.message.answer(
         text,
@@ -1052,7 +1122,7 @@ async def cb_return_debt_list(callback: CallbackQuery, state: FSMContext):
         await callback.answer()
         return
         
-    buttons = [[InlineKeyboardButton(text=f"{r[1]} ({r[2]}р)", callback_data=f"ret_sel_{r[0]}")] for r in rows]
+    buttons = [[InlineKeyboardButton(text=f"{r[1]} ({format_currency(r[2])})", callback_data=f"ret_sel_{r[0]}")] for r in rows]
     buttons.append([
         InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
     ])
@@ -1132,8 +1202,8 @@ async def process_debt_return_final(message: Message, state: FSMContext):
                 
                 msg = await message.answer(
                     f"✅ Долг частично погашен.\n"
-                    f"Остаток: {new_amount} руб.\n"
-                    f"Возвращено: {new_returned} руб.\n\nХотите добавить еще долг?",
+                    f"Остаток: {format_currency(new_amount)}\n"
+                    f"Возвращено: {format_currency(new_returned)}\n\nХотите добавить еще долг?",
                     reply_markup=get_continue_or_menu("continue_debt")
                 )
                 await add_message_to_cleanup(msg, state)
