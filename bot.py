@@ -71,8 +71,7 @@ async def init_db():
                 amount REAL NOT NULL,
                 comment TEXT,
                 date TEXT NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(user_id),
-                FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
+                FOREIGN KEY (user_id) REFERENCES users(user_id)
             )
         """)
         # Таблица долгов
@@ -129,6 +128,15 @@ async def add_message_to_cleanup(message: Message, state: FSMContext):
     message_ids.append(message.message_id)
     await state.update_data(message_ids=message_ids)
 
+async def delete_expenses_for_category(category_id: int, user_id: int):
+    """Удаляет все расходы для указанной категории"""
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "DELETE FROM expenses WHERE category_id = ? AND user_id = ?",
+            (category_id, user_id)
+        )
+        await db.commit()
+
 async def update_category_list_message(message: Message, state: FSMContext):
     """Обновляет список категорий в текущем сообщении"""
     async with aiosqlite.connect(DB_NAME) as db:
@@ -156,6 +164,47 @@ async def update_category_list_message(message: Message, state: FSMContext):
     msg = await message.answer(text, reply_markup=kb)
     await add_message_to_cleanup(msg, state)
 
+async def get_main_menu_with_stats(user_id: int):
+    """Главное меню со встроенной статистикой"""
+    current_month = datetime.now().strftime("%Y-%m")
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Всего доходов за месяц
+        async with db.execute(
+            "SELECT SUM(amount) FROM incomes WHERE user_id = ? AND strftime('%Y-%m', date) = ?",
+            (user_id, current_month)
+        ) as cursor:
+            total_income = (await cursor.fetchone())[0] or 0.0
+
+        # Всего расходов за месяц
+        async with db.execute(
+            "SELECT SUM(amount) FROM expenses WHERE user_id = ? AND strftime('%Y-%m', date) = ?",
+            (user_id, current_month)
+        ) as cursor:
+            total_expense = (await cursor.fetchone())[0] or 0.0
+        
+        # Сумма возвращенных долгов
+        async with db.execute(
+            "SELECT SUM(returned_amount) FROM debts WHERE user_id = ?",
+            (user_id,)
+        ) as cursor:
+            total_returned = (await cursor.fetchone())[0] or 0.0
+
+    balance = total_income - total_expense + total_returned
+    
+    text = f"🏠 Главное меню\n\n"
+    text += f"📊 {html.bold('Статистика за текущий месяц')} ({current_month}):\n"
+    text += f"💰 Доходы: {total_income} руб.\n"
+    text += f"📉 Расходы: {total_expense} руб.\n"
+    if total_returned > 0:
+        text += f"💳 Возвращено долгов: {total_returned} руб.\n"
+    text += f"⚖️ Баланс: {balance} руб."
+    if total_returned > 0:
+        text += f" (Из них {total_returned} руб. - возвращенные долги)\n"
+    text += "\n\nВыберите действие:"
+    
+    return text
+
 # =====================================================================
 # КЛАВИАТУРЫ
 # =====================================================================
@@ -165,8 +214,7 @@ def get_main_menu():
         [InlineKeyboardButton(text="💰 Доходы", callback_data="menu_income")],
         [InlineKeyboardButton(text="📉 Расходы", callback_data="menu_expense")],
         [InlineKeyboardButton(text="🗂 Категории", callback_data="menu_categories")],
-        [InlineKeyboardButton(text="🤝 Долги", callback_data="menu_debts")],
-        [InlineKeyboardButton(text="📊 Статистика за месяц", callback_data="menu_statistics")]
+        [InlineKeyboardButton(text="🤝 Долги", callback_data="menu_debts")]
     ])
 
 def get_back_menu(back_callback: str = "back"):
@@ -174,6 +222,19 @@ def get_back_menu(back_callback: str = "back"):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="🔙 Назад", callback_data=back_callback),
+            InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
+        ]
+    ])
+
+def get_income_comment_menu():
+    """Меню для выбора добавления комментария к доходу"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="✅ Да", callback_data="income_comment_yes"),
+            InlineKeyboardButton(text="❌ Нет", callback_data="income_comment_no")
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back"),
             InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
         ]
     ])
@@ -234,9 +295,9 @@ async def cmd_start(message: Message, state: FSMContext):
     
     await state.update_data(message_ids=[])
     
+    main_text = await get_main_menu_with_stats(message.from_user.id)
     msg = await message.answer(
-        f"Привет, {html.bold(message.from_user.full_name)}! 👋\n\n"
-        "Я твой бот-финансист. Выбери действие в меню ниже:",
+        main_text,
         reply_markup=get_main_menu()
     )
     await add_message_to_cleanup(msg, state)
@@ -250,8 +311,10 @@ async def back_to_main_menu(callback: CallbackQuery, state: FSMContext):
     """Возврат в главное меню"""
     await state.clear()
     await callback.message.delete()
+    
+    main_text = await get_main_menu_with_stats(callback.from_user.id)
     msg = await callback.message.answer(
-        "🏠 Главное меню:\n\nВыберите действие:",
+        main_text,
         reply_markup=get_main_menu()
     )
     await add_message_to_cleanup(msg, state)
@@ -262,8 +325,10 @@ async def go_back(callback: CallbackQuery, state: FSMContext):
     """Возврат в главное меню"""
     await state.clear()
     await callback.message.delete()
+    
+    main_text = await get_main_menu_with_stats(callback.from_user.id)
     msg = await callback.message.answer(
-        "🏠 Главное меню:\n\nВыберите действие:",
+        main_text,
         reply_markup=get_main_menu()
     )
     await add_message_to_cleanup(msg, state)
@@ -294,8 +359,8 @@ async def process_income_amount(message: Message, state: FSMContext):
         
         await message.delete()
         msg = await message.answer(
-            "💬 Введите комментарий к доходу (или '-' если нет):",
-            reply_markup=get_back_menu()
+            f"💰 Сумма: {amount} руб.\n\nХотите добавить комментарий?",
+            reply_markup=get_income_comment_menu()
         )
         await add_message_to_cleanup(msg, state)
     except ValueError:
@@ -305,41 +370,63 @@ async def process_income_amount(message: Message, state: FSMContext):
         )
         await add_message_to_cleanup(msg, state)
 
-@dp.message(FinanceStates.income_comment)
-async def process_income_comment(message: Message, state: FSMContext):
-    comment = message.text if message.text != "-" else ""
+@dp.callback_query(F.data == "income_comment_yes")
+async def process_income_comment_yes(callback: CallbackQuery, state: FSMContext):
+    await callback.message.delete()
+    await state.set_state(FinanceStates.income_comment)
+    msg = await callback.message.answer(
+        "💬 Введите комментарий к доходу:",
+        reply_markup=get_back_menu()
+    )
+    await add_message_to_cleanup(msg, state)
+    await callback.answer()
+
+@dp.callback_query(F.data == "income_comment_no")
+async def process_income_comment_no(callback: CallbackQuery, state: FSMContext):
+    await callback.message.delete()
+    
     data = await state.get_data()
+    amount = data.get('amount')
     date_str = datetime.now().strftime("%Y-%m-%d")
     
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute(
             "INSERT INTO incomes (user_id, amount, comment, date) VALUES (?, ?, ?, ?)",
-            (message.from_user.id, data['amount'], comment, date_str)
+            (callback.from_user.id, amount, "", date_str)
+        )
+        await db.commit()
+    
+    main_text = await get_main_menu_with_stats(callback.from_user.id)
+    msg = await callback.message.answer(
+        f"✅ Доход сохранен: {amount} руб.\n\n{main_text}",
+        reply_markup=get_main_menu()
+    )
+    await add_message_to_cleanup(msg, state)
+    await callback.answer()
+
+@dp.message(FinanceStates.income_comment)
+async def process_income_comment(message: Message, state: FSMContext):
+    comment = message.text.strip()
+    data = await state.get_data()
+    amount = data.get('amount')
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO incomes (user_id, amount, comment, date) VALUES (?, ?, ?, ?)",
+            (message.from_user.id, amount, comment, date_str)
         )
         await db.commit()
     
     await clear_all_messages(message, state)
     await message.delete()
     
+    main_text = await get_main_menu_with_stats(message.from_user.id)
     msg = await message.answer(
-        f"✅ Доход сохранен: {data['amount']} руб.\n"
-        f"💬 Комментарий: {comment if comment else 'Нет'}\n\n"
-        "Хотите добавить еще доход?",
-        reply_markup=get_continue_or_menu("continue_income")
+        f"✅ Доход сохранен: {amount} руб.\n💬 Комментарий: {comment}\n\n{main_text}",
+        reply_markup=get_main_menu()
     )
     await add_message_to_cleanup(msg, state)
-
-@dp.callback_query(F.data == "continue_income")
-async def continue_adding_income(callback: CallbackQuery, state: FSMContext):
-    """Продолжить добавление доходов"""
-    await callback.message.delete()
-    await state.set_state(FinanceStates.income_amount)
-    msg = await callback.message.answer(
-        "💰 Введите сумму дохода:",
-        reply_markup=get_back_menu()
-    )
-    await add_message_to_cleanup(msg, state)
-    await callback.answer()
 
 # ---------------------------------------------------------------------
 # СЦЕНАРИЙ: РАСХОДЫ
@@ -415,9 +502,9 @@ async def process_expense_amount(message: Message, state: FSMContext):
         await clear_all_messages(message, state)
         await message.delete()
         
+        main_text = await get_main_menu_with_stats(message.from_user.id)
         msg = await message.answer(
-            f"✅ Расход сохранен: {amount} руб.\n\n"
-            "Хотите добавить еще расход?",
+            f"✅ Расход сохранен: {amount} руб.\n\nХотите добавить еще расход?\n\n{main_text}",
             reply_markup=get_continue_or_menu("continue_expense")
         )
         await add_message_to_cleanup(msg, state)
@@ -533,13 +620,16 @@ async def continue_adding_category(callback: CallbackQuery, state: FSMContext):
 async def cb_delete_category_confirm(callback: CallbackQuery, state: FSMContext):
     cat_id = int(callback.data.split("_")[3])
     
+    # Удаляем расходы, связанные с этой категорией
+    await delete_expenses_for_category(cat_id, callback.from_user.id)
+    
     async with aiosqlite.connect(DB_NAME) as db:
         # Получаем название категории
         async with db.execute("SELECT name FROM categories WHERE id = ? AND user_id = ?", (cat_id, callback.from_user.id)) as cursor:
             cat_name = await cursor.fetchone()
             name = cat_name[0] if cat_name else "Категория"
         
-        # Удаляем категорию (расходы удаляются каскадно)
+        # Удаляем категорию
         await db.execute("DELETE FROM categories WHERE id = ? AND user_id = ?", (cat_id, callback.from_user.id))
         await db.commit()
     
@@ -622,6 +712,8 @@ async def process_debt_name(message: Message, state: FSMContext):
     await state.set_state(FinanceStates.debt_amount)
     
     await message.delete()
+    await clear_all_messages(message, state)
+    
     msg = await message.answer(
         "💰 Введите сумму:",
         reply_markup=get_back_menu()
@@ -646,9 +738,9 @@ async def process_debt_amount(message: Message, state: FSMContext):
         await clear_all_messages(message, state)
         await message.delete()
         
+        main_text = await get_main_menu_with_stats(message.from_user.id)
         msg = await message.answer(
-            "✅ Долг успешно зафиксирован!\n\n"
-            "Хотите добавить еще долг?",
+            f"✅ Долг успешно зафиксирован!\n\nХотите добавить еще долг?\n\n{main_text}",
             reply_markup=get_continue_or_menu("continue_debt")
         )
         await add_message_to_cleanup(msg, state)
@@ -758,9 +850,10 @@ async def process_debt_return_final(message: Message, state: FSMContext):
                 await db.execute("DELETE FROM debts WHERE id = ?", (debt_id,))
                 await clear_all_messages(message, state)
                 await message.delete()
+                
+                main_text = await get_main_menu_with_stats(message.from_user.id)
                 msg = await message.answer(
-                    f"🎉 Долг перед/от {name} полностью закрыт!\n\n"
-                    "Что хотите сделать дальше?",
+                    f"🎉 Долг перед/от {name} полностью закрыт!\n\n{main_text}",
                     reply_markup=get_main_menu()
                 )
                 await add_message_to_cleanup(msg, state)
@@ -771,11 +864,12 @@ async def process_debt_return_final(message: Message, state: FSMContext):
                 )
                 await clear_all_messages(message, state)
                 await message.delete()
+                
+                main_text = await get_main_menu_with_stats(message.from_user.id)
                 msg = await message.answer(
                     f"✅ Долг частично погашен.\n"
                     f"Остаток: {new_amount} руб.\n"
-                    f"Возвращено: {new_returned} руб.\n\n"
-                    "Что хотите сделать дальше?",
+                    f"Возвращено: {new_returned} руб.\n\n{main_text}",
                     reply_markup=get_main_menu()
                 )
                 await add_message_to_cleanup(msg, state)
@@ -788,131 +882,6 @@ async def process_debt_return_final(message: Message, state: FSMContext):
             reply_markup=get_back_menu()
         )
         await add_message_to_cleanup(msg, state)
-
-# ---------------------------------------------------------------------
-# СЦЕНАРИЙ: СТАТИСТИКА
-# ---------------------------------------------------------------------
-@dp.callback_query(F.data == "menu_statistics")
-async def process_statistics(callback: CallbackQuery, state: FSMContext):
-    await callback.message.delete()
-    
-    current_month = datetime.now().strftime("%Y-%m")
-    
-    async with aiosqlite.connect(DB_NAME) as db:
-        # Проверяем, нужно ли обнулить статистику за новый месяц
-        async with db.execute(
-            "SELECT date FROM incomes WHERE user_id = ? ORDER BY date DESC LIMIT 1",
-            (callback.from_user.id,)
-        ) as cursor:
-            last_income = await cursor.fetchone()
-        
-        async with db.execute(
-            "SELECT date FROM expenses WHERE user_id = ? ORDER BY date DESC LIMIT 1",
-            (callback.from_user.id,)
-        ) as cursor:
-            last_expense = await cursor.fetchone()
-        
-        if last_income or last_expense:
-            last_date = last_income[0] if last_income else last_expense[0]
-            last_month = last_date[:7]
-            
-            if last_month != current_month:
-                await db.execute(
-                    "DELETE FROM incomes WHERE user_id = ? AND strftime('%Y-%m', date) != ?",
-                    (callback.from_user.id, current_month)
-                )
-                await db.execute(
-                    "DELETE FROM expenses WHERE user_id = ? AND strftime('%Y-%m', date) != ?",
-                    (callback.from_user.id, current_month)
-                )
-                await db.commit()
-        
-        # Всего доходов за месяц
-        async with db.execute(
-            "SELECT SUM(amount) FROM incomes WHERE user_id = ? AND strftime('%Y-%m', date) = ?",
-            (callback.from_user.id, current_month)
-        ) as cursor:
-            total_income = (await cursor.fetchone())[0] or 0.0
-
-        # Всего расходов за месяц
-        async with db.execute(
-            "SELECT SUM(amount) FROM expenses WHERE user_id = ? AND strftime('%Y-%m', date) = ?",
-            (callback.from_user.id, current_month)
-        ) as cursor:
-            total_expense = (await cursor.fetchone())[0] or 0.0
-        
-        # Получаем сумму возвращенных долгов
-        async with db.execute(
-            "SELECT SUM(returned_amount) FROM debts WHERE user_id = ?",
-            (callback.from_user.id,)
-        ) as cursor:
-            total_returned = (await cursor.fetchone())[0] or 0.0
-            
-        # ТОП-3 категории расходов
-        async with db.execute("""
-            SELECT c.name, SUM(e.amount) as total 
-            FROM expenses e
-            JOIN categories c ON e.category_id = c.id
-            WHERE e.user_id = ? AND strftime('%Y-%m', e.date) = ?
-            GROUP BY e.category_id
-            ORDER BY total DESC
-            LIMIT 3
-        """, (callback.from_user.id, current_month)) as cursor:
-            top_categories = await cursor.fetchall()
-
-    balance = total_income - total_expense + total_returned
-    
-    text = f"📊 {html.bold('Статистика за текущий месяц')} ({current_month}):\n\n"
-    text += f"💰 {html.bold('Доходы:')} {total_income} руб.\n"
-    text += f"📉 {html.bold('Расходы:')} {total_expense} руб.\n"
-    
-    if total_returned > 0:
-        text += f"💳 {html.bold('Возвращено долгов:')} {total_returned} руб.\n"
-    
-    text += f"⚖️ {html.bold('Баланс:')} {balance} руб."
-    
-    if total_returned > 0:
-        text += f" (Из них {total_returned} руб. - возвращенные долги)\n\n"
-    else:
-        text += "\n\n"
-    
-    # Процентное соотношение расходов
-    if total_expense > 0:
-        text += html.bold("📊 Распределение расходов:\n")
-        for cat_name, sum_val in top_categories:
-            percentage = (sum_val / total_expense) * 100
-            text += f"• {cat_name}: {percentage:.1f}% ({sum_val} руб.)\n"
-        
-        # Остальные расходы
-        async with aiosqlite.connect(DB_NAME) as db:
-            async with db.execute("""
-                SELECT SUM(e.amount) as total 
-                FROM expenses e
-                WHERE e.user_id = ? 
-                AND strftime('%Y-%m', e.date) = ?
-                AND e.category_id NOT IN (
-                    SELECT category_id FROM expenses 
-                    WHERE user_id = ? 
-                    AND strftime('%Y-%m', date) = ?
-                    GROUP BY category_id
-                    ORDER BY SUM(amount) DESC
-                    LIMIT 3
-                )
-            """, (callback.from_user.id, current_month, callback.from_user.id, current_month)) as cursor:
-                other_total = (await cursor.fetchone())[0] or 0.0
-        
-        if other_total > 0:
-            other_percentage = (other_total / total_expense) * 100
-            text += f"• Остальное: {other_percentage:.1f}% ({other_total} руб.)\n"
-    else:
-        text += "📊 За этот месяц расходов еще не было."
-    
-    msg = await callback.message.answer(
-        text,
-        reply_markup=get_back_menu()
-    )
-    await add_message_to_cleanup(msg, state)
-    await callback.answer()
 
 # =====================================================================
 # ЗАПУСК БОТА
