@@ -103,7 +103,7 @@ async def seed_default_categories(user_id: int):
                 logger.info(f"Созданы категории по умолчанию для пользователя {user_id}")
 
 # =====================================================================
-# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ УДАЛЕНИЯ СООБЩЕНИЙ
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # =====================================================================
 async def clear_all_messages(message: Message, state: FSMContext):
     """Удаляет все сообщения пользователя в чате"""
@@ -136,31 +136,23 @@ async def update_category_list_message(message: Message, state: FSMContext):
             categories = await cursor.fetchall()
     
     if not categories:
-        msg = await message.answer(
-            "🗂 Ваши категории расходов пусты.\n\n"
-            "Хотите добавить категорию?",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="➕ Добавить категорию", callback_data="cat_add")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="back"),
-                 InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
-            ])
-        )
-        await add_message_to_cleanup(msg, state)
-        return
+        text = "🗂 У вас нет категорий расходов.\n\nХотите добавить категорию?"
+        buttons = [
+            [InlineKeyboardButton(text="➕ Добавить категорию", callback_data="cat_add")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_categories")],
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
+        ]
+    else:
+        cats_str = "\n".join([f"• {cat[1]}" for cat in categories])
+        text = f"🗂 Ваши категории расходов:\n\n{cats_str}\n\n⚠️ Нажмите на категорию, чтобы удалить ее.\n(Связанные расходы также будут удалены!)"
+        buttons = [[InlineKeyboardButton(text=f"❌ {cat[1]}", callback_data=f"cat_del_id_{cat[0]}")] for cat in categories]
+        buttons.append([
+            InlineKeyboardButton(text="➕ Добавить категорию", callback_data="cat_add"),
+            InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_categories"),
+            InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
+        ])
     
-    buttons = [[InlineKeyboardButton(text=f"❌ {cat[1]}", callback_data=f"cat_del_id_{cat[0]}")] for cat in categories]
-    buttons.append([
-        InlineKeyboardButton(text="➕ Добавить категорию", callback_data="cat_add"),
-        InlineKeyboardButton(text="🔙 Назад", callback_data="back"),
-        InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
-    ])
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    
-    cats_str = "\n".join([f"• {cat[1]}" for cat in categories])
-    text = f"🗂 Ваши категории расходов:\n\n{cats_str}\n\n"
-    text += "⚠️ Нажмите на категорию, чтобы удалить ее.\n"
-    text += "(Связанные расходы также будут удалены!)"
-    
     msg = await message.answer(text, reply_markup=kb)
     await add_message_to_cleanup(msg, state)
 
@@ -177,39 +169,19 @@ def get_main_menu():
         [InlineKeyboardButton(text="📊 Статистика за месяц", callback_data="menu_statistics")]
     ])
 
-def get_back_menu():
-    """Кнопки навигации: Назад и В меню"""
+def get_back_menu(back_callback: str = "back"):
+    """Кнопки навигации с указанием куда возвращаться"""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="🔙 Назад", callback_data="back"),
+            InlineKeyboardButton(text="🔙 Назад", callback_data=back_callback),
             InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")
         ]
     ])
 
-def get_categories_menu():
-    """Меню управления категориями"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить категорию", callback_data="cat_add")],
-        [InlineKeyboardButton(text="🗑 Удалить категорию", callback_data="cat_del_list")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back"),
-         InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
-    ])
-
-def get_debts_menu():
-    """Меню управления долгами"""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🙋‍♂️ Мне должны (Новый)", callback_data="debt_owed_to_me"),
-         InlineKeyboardButton(text="💰 Мне вернули", callback_data="return_owed_to_me")],
-        [InlineKeyboardButton(text="🙇‍♂️ Я должен (Новый)", callback_data="debt_i_owe"),
-         InlineKeyboardButton(text="💸 Я вернул", callback_data="return_i_owe")],
-        [InlineKeyboardButton(text="🔙 Назад", callback_data="back"),
-         InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
-    ])
-
-def get_continue_or_menu():
+def get_continue_or_menu(continue_callback: str = "continue"):
     """Кнопки: Добавить еще или В меню"""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить еще", callback_data="continue")],
+        [InlineKeyboardButton(text="➕ Добавить еще", callback_data=continue_callback)],
         [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
     ])
 
@@ -220,6 +192,7 @@ class FinanceStates(StatesGroup):
     """Состояния конечного автомата"""
     # Доходы
     income_amount = State()
+    income_comment = State()
     # Расходы
     expense_category = State()
     expense_amount = State()
@@ -249,22 +222,18 @@ async def cmd_start(message: Message, state: FSMContext):
     """Обработчик команды /start"""
     await state.clear()
     
-    # Удаляем сообщение с командой /start
     try:
         await message.delete()
     except Exception:
         pass
     
-    # Регистрируем пользователя
     async with aiosqlite.connect(DB_NAME) as db:
         await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (message.from_user.id,))
         await db.commit()
     await seed_default_categories(message.from_user.id)
     
-    # Очищаем историю сообщений
     await state.update_data(message_ids=[])
     
-    # Отправляем главное меню
     msg = await message.answer(
         f"Привет, {html.bold(message.from_user.full_name)}! 👋\n\n"
         "Я твой бот-финансист. Выбери действие в меню ниже:",
@@ -290,11 +259,11 @@ async def back_to_main_menu(callback: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "back")
 async def go_back(callback: CallbackQuery, state: FSMContext):
-    """Возврат на предыдущий шаг"""
+    """Возврат в главное меню"""
     await state.clear()
     await callback.message.delete()
     msg = await callback.message.answer(
-        "Выберите действие:",
+        "🏠 Главное меню:\n\nВыберите действие:",
         reply_markup=get_main_menu()
     )
     await add_message_to_cleanup(msg, state)
@@ -321,25 +290,12 @@ async def process_income_amount(message: Message, state: FSMContext):
         if amount <= 0:
             raise ValueError
         await state.update_data(amount=amount)
+        await state.set_state(FinanceStates.income_comment)
         
-        # Сохраняем доход
-        date_str = datetime.now().strftime("%Y-%m-%d")
-        async with aiosqlite.connect(DB_NAME) as db:
-            await db.execute(
-                "INSERT INTO incomes (user_id, amount, comment, date) VALUES (?, ?, ?, ?)",
-                (message.from_user.id, amount, "", date_str)
-            )
-            await db.commit()
-        
-        # Удаляем все сообщения
-        await clear_all_messages(message, state)
         await message.delete()
-        
-        # Спрашиваем о добавлении еще
         msg = await message.answer(
-            f"✅ Доход сохранен: {amount} руб.\n\n"
-            "Хотите добавить еще доход?",
-            reply_markup=get_continue_or_menu()
+            "💬 Введите комментарий к доходу (или '-' если нет):",
+            reply_markup=get_back_menu()
         )
         await add_message_to_cleanup(msg, state)
     except ValueError:
@@ -349,7 +305,31 @@ async def process_income_amount(message: Message, state: FSMContext):
         )
         await add_message_to_cleanup(msg, state)
 
-@dp.callback_query(F.data == "continue")
+@dp.message(FinanceStates.income_comment)
+async def process_income_comment(message: Message, state: FSMContext):
+    comment = message.text if message.text != "-" else ""
+    data = await state.get_data()
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute(
+            "INSERT INTO incomes (user_id, amount, comment, date) VALUES (?, ?, ?, ?)",
+            (message.from_user.id, data['amount'], comment, date_str)
+        )
+        await db.commit()
+    
+    await clear_all_messages(message, state)
+    await message.delete()
+    
+    msg = await message.answer(
+        f"✅ Доход сохранен: {data['amount']} руб.\n"
+        f"💬 Комментарий: {comment if comment else 'Нет'}\n\n"
+        "Хотите добавить еще доход?",
+        reply_markup=get_continue_or_menu("continue_income")
+    )
+    await add_message_to_cleanup(msg, state)
+
+@dp.callback_query(F.data == "continue_income")
 async def continue_adding_income(callback: CallbackQuery, state: FSMContext):
     """Продолжить добавление доходов"""
     await callback.message.delete()
@@ -374,8 +354,12 @@ async def process_expense_start(callback: CallbackQuery, state: FSMContext):
             
     if not categories:
         msg = await callback.message.answer(
-            "❌ У вас нет категорий. Сначала добавьте их в меню '🗂 Категории'.",
-            reply_markup=get_back_menu()
+            "❌ У вас нет категорий расходов.\n\nХотите создать категорию?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Создать категорию", callback_data="cat_add")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="back")],
+                [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
+            ])
         )
         await add_message_to_cleanup(msg, state)
         await callback.answer()
@@ -421,7 +405,6 @@ async def process_expense_amount(message: Message, state: FSMContext):
         data = await state.get_data()
         date_str = datetime.now().strftime("%Y-%m-%d")
         
-        # Сохраняем расход
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute(
                 "INSERT INTO expenses (user_id, category_id, amount, comment, date) VALUES (?, ?, ?, ?, ?)",
@@ -429,15 +412,13 @@ async def process_expense_amount(message: Message, state: FSMContext):
             )
             await db.commit()
         
-        # Удаляем все сообщения
         await clear_all_messages(message, state)
         await message.delete()
         
-        # Спрашиваем о добавлении еще
         msg = await message.answer(
             f"✅ Расход сохранен: {amount} руб.\n\n"
             "Хотите добавить еще расход?",
-            reply_markup=get_continue_or_menu()
+            reply_markup=get_continue_or_menu("continue_expense")
         )
         await add_message_to_cleanup(msg, state)
     except ValueError:
@@ -447,7 +428,7 @@ async def process_expense_amount(message: Message, state: FSMContext):
         )
         await add_message_to_cleanup(msg, state)
 
-@dp.callback_query(F.data == "continue")
+@dp.callback_query(F.data == "continue_expense")
 async def continue_adding_expense(callback: CallbackQuery, state: FSMContext):
     """Продолжить добавление расходов"""
     await callback.message.delete()
@@ -458,8 +439,12 @@ async def continue_adding_expense(callback: CallbackQuery, state: FSMContext):
 
     if not categories:
         msg = await callback.message.answer(
-            "❌ У вас нет категорий. Сначала добавьте их в меню '🗂 Категории'.",
-            reply_markup=get_back_menu()
+            "❌ У вас нет категорий расходов.\n\nХотите создать категорию?",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Создать категорию", callback_data="cat_add")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="back")],
+                [InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
+            ])
         )
         await add_message_to_cleanup(msg, state)
         await callback.answer()
@@ -489,13 +474,20 @@ async def process_categories_main(callback: CallbackQuery, state: FSMContext):
     await update_category_list_message(callback.message, state)
     await callback.answer()
 
+@dp.callback_query(F.data == "back_to_categories")
+async def back_to_categories(callback: CallbackQuery, state: FSMContext):
+    """Возврат в меню категорий"""
+    await callback.message.delete()
+    await update_category_list_message(callback.message, state)
+    await callback.answer()
+
 @dp.callback_query(F.data == "cat_add")
 async def cb_add_category(callback: CallbackQuery, state: FSMContext):
     await callback.message.delete()
     await state.set_state(FinanceStates.add_category)
     msg = await callback.message.answer(
         "➕ Введите название новой категории:",
-        reply_markup=get_back_menu()
+        reply_markup=get_back_menu("back_to_categories")
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
@@ -506,7 +498,7 @@ async def process_add_category_title(message: Message, state: FSMContext):
     if not title:
         msg = await message.answer(
             "❌ Название не может быть пустым.",
-            reply_markup=get_back_menu()
+            reply_markup=get_back_menu("back_to_categories")
         )
         await add_message_to_cleanup(msg, state)
         return
@@ -515,26 +507,24 @@ async def process_add_category_title(message: Message, state: FSMContext):
         await db.execute("INSERT INTO categories (user_id, name) VALUES (?, ?)", (message.from_user.id, title))
         await db.commit()
     
-    # Удаляем все сообщения
     await clear_all_messages(message, state)
     await message.delete()
     
-    # Спрашиваем о добавлении еще
     msg = await message.answer(
         f"✅ Категория '{title}' успешно добавлена!\n\n"
         "Хотите добавить еще категорию?",
-        reply_markup=get_continue_or_menu()
+        reply_markup=get_continue_or_menu("continue_category")
     )
     await add_message_to_cleanup(msg, state)
 
-@dp.callback_query(F.data == "continue")
+@dp.callback_query(F.data == "continue_category")
 async def continue_adding_category(callback: CallbackQuery, state: FSMContext):
     """Продолжить добавление категорий"""
     await callback.message.delete()
     await state.set_state(FinanceStates.add_category)
     msg = await callback.message.answer(
         "➕ Введите название новой категории:",
-        reply_markup=get_back_menu()
+        reply_markup=get_back_menu("back_to_categories")
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
@@ -544,18 +534,16 @@ async def cb_delete_category_confirm(callback: CallbackQuery, state: FSMContext)
     cat_id = int(callback.data.split("_")[3])
     
     async with aiosqlite.connect(DB_NAME) as db:
-        # Получаем название категории для отображения
+        # Получаем название категории
         async with db.execute("SELECT name FROM categories WHERE id = ? AND user_id = ?", (cat_id, callback.from_user.id)) as cursor:
             cat_name = await cursor.fetchone()
             name = cat_name[0] if cat_name else "Категория"
         
+        # Удаляем категорию (расходы удаляются каскадно)
         await db.execute("DELETE FROM categories WHERE id = ? AND user_id = ?", (cat_id, callback.from_user.id))
         await db.commit()
     
-    # Удаляем сообщение с кнопкой
     await callback.message.delete()
-    
-    # Обновляем список категорий
     await update_category_list_message(callback.message, state)
     await callback.answer()
 
@@ -570,8 +558,8 @@ async def process_debts_main(callback: CallbackQuery, state: FSMContext):
         async with db.execute("SELECT debtor_creditor, amount, debt_type FROM debts WHERE user_id = ?", (callback.from_user.id,)) as cursor:
             rows = await cursor.fetchall()
             
-    owed_to_me = []  # Мне должны
-    i_owe = []       # Я должен
+    owed_to_me = []
+    i_owe = []
     total_owed_to_me = 0
     total_i_owe = 0
     
@@ -602,6 +590,17 @@ async def process_debts_main(callback: CallbackQuery, state: FSMContext):
     )
     await add_message_to_cleanup(msg, state)
     await callback.answer()
+
+def get_debts_menu():
+    """Меню управления долгами"""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🙋‍♂️ Мне должны (Новый)", callback_data="debt_owed_to_me"),
+         InlineKeyboardButton(text="💰 Мне вернули", callback_data="return_owed_to_me")],
+        [InlineKeyboardButton(text="🙇‍♂️ Я должен (Новый)", callback_data="debt_i_owe"),
+         InlineKeyboardButton(text="💸 Я вернул", callback_data="return_i_owe")],
+        [InlineKeyboardButton(text="🔙 Назад", callback_data="back"),
+         InlineKeyboardButton(text="🏠 В меню", callback_data="main_menu")]
+    ])
 
 @dp.callback_query(F.data.startswith("debt_"))
 async def cb_new_debt(callback: CallbackQuery, state: FSMContext):
@@ -650,7 +649,7 @@ async def process_debt_amount(message: Message, state: FSMContext):
         msg = await message.answer(
             "✅ Долг успешно зафиксирован!\n\n"
             "Хотите добавить еще долг?",
-            reply_markup=get_continue_or_menu()
+            reply_markup=get_continue_or_menu("continue_debt")
         )
         await add_message_to_cleanup(msg, state)
     except ValueError:
@@ -660,9 +659,22 @@ async def process_debt_amount(message: Message, state: FSMContext):
         )
         await add_message_to_cleanup(msg, state)
 
+@dp.callback_query(F.data == "continue_debt")
+async def continue_adding_debt(callback: CallbackQuery, state: FSMContext):
+    """Продолжить добавление долгов"""
+    await callback.message.delete()
+    await state.set_state(FinanceStates.debt_name)
+    msg = await callback.message.answer(
+        "👤 Введите имя человека:",
+        reply_markup=get_back_menu()
+    )
+    await add_message_to_cleanup(msg, state)
+    await callback.answer()
+
 @dp.callback_query(F.data.startswith("return_"))
 async def cb_return_debt_list(callback: CallbackQuery, state: FSMContext):
     debt_type = callback.data.replace("return_", "")
+    await state.update_data(return_debt_type=debt_type)
     await callback.message.delete()
     
     async with aiosqlite.connect(DB_NAME) as db:
@@ -736,7 +748,6 @@ async def process_debt_return_final(message: Message, state: FSMContext):
             current_amount, name, debt_type = row
             new_amount = current_amount - return_amount
             
-            # Сохраняем сумму возврата в отдельное поле для статистики
             async with db.execute("SELECT returned_amount FROM debts WHERE id = ?", (debt_id,)) as cursor:
                 returned = await cursor.fetchone()
                 returned_amount = returned[0] if returned else 0
@@ -744,7 +755,6 @@ async def process_debt_return_final(message: Message, state: FSMContext):
             new_returned = returned_amount + return_amount
             
             if new_amount <= 0:
-                # Полностью погашен - удаляем из активных долгов
                 await db.execute("DELETE FROM debts WHERE id = ?", (debt_id,))
                 await clear_all_messages(message, state)
                 await message.delete()
@@ -755,7 +765,6 @@ async def process_debt_return_final(message: Message, state: FSMContext):
                 )
                 await add_message_to_cleanup(msg, state)
             else:
-                # Обновляем сумму долга и возвращенную сумму
                 await db.execute(
                     "UPDATE debts SET amount = ?, returned_amount = ? WHERE id = ?", 
                     (new_amount, new_returned, debt_id)
@@ -788,38 +797,30 @@ async def process_statistics(callback: CallbackQuery, state: FSMContext):
     await callback.message.delete()
     
     current_month = datetime.now().strftime("%Y-%m")
-    current_year = datetime.now().strftime("%Y")
-    current_day = datetime.now().strftime("%d")
-    current_month_num = datetime.now().month
     
     async with aiosqlite.connect(DB_NAME) as db:
         # Проверяем, нужно ли обнулить статистику за новый месяц
-        # Получаем дату последней записи доходов
         async with db.execute(
             "SELECT date FROM incomes WHERE user_id = ? ORDER BY date DESC LIMIT 1",
             (callback.from_user.id,)
         ) as cursor:
             last_income = await cursor.fetchone()
         
-        # Получаем дату последней записи расходов
         async with db.execute(
             "SELECT date FROM expenses WHERE user_id = ? ORDER BY date DESC LIMIT 1",
             (callback.from_user.id,)
         ) as cursor:
             last_expense = await cursor.fetchone()
         
-        # Если есть записи и они за прошлый месяц, удаляем их
         if last_income or last_expense:
             last_date = last_income[0] if last_income else last_expense[0]
-            last_month = last_date[:7]  # YYYY-MM
+            last_month = last_date[:7]
             
             if last_month != current_month:
-                # Удаляем доходы за прошлые месяцы
                 await db.execute(
                     "DELETE FROM incomes WHERE user_id = ? AND strftime('%Y-%m', date) != ?",
                     (callback.from_user.id, current_month)
                 )
-                # Удаляем расходы за прошлые месяцы
                 await db.execute(
                     "DELETE FROM expenses WHERE user_id = ? AND strftime('%Y-%m', date) != ?",
                     (callback.from_user.id, current_month)
@@ -840,7 +841,7 @@ async def process_statistics(callback: CallbackQuery, state: FSMContext):
         ) as cursor:
             total_expense = (await cursor.fetchone())[0] or 0.0
         
-        # Получаем сумму возвращенных долгов (для показа в балансе)
+        # Получаем сумму возвращенных долгов
         async with db.execute(
             "SELECT SUM(returned_amount) FROM debts WHERE user_id = ?",
             (callback.from_user.id,)
